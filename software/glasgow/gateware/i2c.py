@@ -435,3 +435,68 @@ class I2CTarget(Elaboratable):
                         m.next = "IDLE"
 
         return m
+
+class I2CObserver(Elaboratable):
+    """
+    Low Level I2C Observer
+
+    Will neither ACK nor write any data on the Bus. A quiet observer usefull for tracing all
+    transactions on the bus its attached to.
+
+    :attr ack:
+        Active for one cycle immediately after acknowledging happend.
+    :attr byte:
+        Active for one cycle immediately after a byte was read (address or data).
+    :attr ack_o:
+        Value of the acknowledge bit.
+    :attr byte_o:
+        Value of the transferred byte.
+    """
+    def __init__(self, pads):
+        self.ack     = Signal()
+        self.byte    = Signal()
+        self.ack_o   = Signal()
+        self.byte_o  = Signal(8)
+
+        self.bus = I2CBus(pads)
+
+    def elaborate(self, platform):
+        m = Module()
+        m.submodules.bus = self.bus
+
+        bitno   = Signal(range(8))
+        shreg_i = Signal(8)
+
+        m.d.sync += self.ack.eq(0)
+        m.d.sync += self.byte.eq(0)
+
+        with m.FSM() as fsm:
+            self._fsm = fsm
+            with m.State("IDLE"):
+                with m.If(self.bus.start):
+                    m.next = "START"
+            with m.State("START"):
+                with m.If(self.bus.stop):
+                    m.next = "IDLE"
+                with m.Elif(self.bus.setup):
+                    m.d.sync += bitno.eq(0)
+                    m.next = "BYTE-SHIFT"
+            with m.State("BYTE-SHIFT"):
+                with m.If(self.bus.stop):
+                    m.next = "IDLE"
+                with m.Elif(self.bus.sample):
+                    m.d.sync += shreg_i.eq((shreg_i << 1) | self.bus.sda_i)
+                with m.Elif(self.bus.setup):
+                    m.d.sync += bitno.eq(bitno + 1)
+                    with m.If(bitno == 7):
+                        m.d.sync += self.byte_o.eq(shreg_i)
+                        m.d.sync += self.byte.eq(1)
+                        m.next = "BYTE-ACK"
+            with m.State("BYTE-ACK"):
+                with m.If(self.bus.stop):
+                    m.next = "IDLE"
+                with m.If(self.bus.sample):
+                    m.d.sync += self.ack_o.eq(self.bus.sda_i)
+                    m.d.sync += self.ack.eq(1)
+                    m.next = "START"
+        return m
